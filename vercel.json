@@ -1,7 +1,7 @@
 {
-  "buildCommand": "cd gammes && npx expo export --platform web",
-  "outputDirectory": "gammes/dist",
-  "installCommand": "cd gammes && npm install --legacy-peer-deps",
+  "buildCommand": "npx expo export --platform web",
+  "outputDirectory": "dist",
+  "installCommand": "npm install --legacy-peer-deps",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]
