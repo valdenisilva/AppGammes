@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   StyleSheet,
   Text,
@@ -10,9 +10,14 @@ import {
   Dimensions,
 } from "react-native";
 import { GameEngine } from "react-native-game-engine";
+import { io } from "socket.io-client";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const ARENA_HEIGHT = 260;
+
+// Substitua pelo IP da sua máquina na mesma rede Wi-Fi se estiver testando localmente
+const SOCKET_URL = "http://192.168.1.197:3000";
+const socket = io(SOCKET_URL);
 
 // 1. Renderizador de Personagem Otimizado
 const CharacterRenderer = ({ x, y, sprite, isHiding, isHit, facing }: any) => {
@@ -78,16 +83,40 @@ const getInitialEntities = () => ({
 
 export default function ArenaPokemonGame() {
   const engineRef = useRef<any>(null);
+  const [playerRole, setPlayerRole] = useState<string | null>(null); // "p1" ou "p2"
   const [hudState, setHudState] = useState({
     p1Hp: 100,
     p1Vidas: 3,
     p2Hp: 100,
     p2Vidas: 3,
-    log: "FIGHT!",
+    log: "Aguardando oponente...",
     winner: null as string | null,
   });
 
-  // 4. Sistema Puro de Física e Regras (Zero chamadas de useState aqui dentro)
+  useEffect(() => {
+    // 1. O servidor define se este celular é o Jogador 1 ou Jogador 2
+    socket.on("assign-role", (role) => {
+      setPlayerRole(role);
+      setHudState((prev) => ({
+        ...prev,
+        log: `Você é o ${role === "p1" ? "Pikachu (P1)" : "Charizard (P2)"}`,
+      }));
+    });
+
+    // 2. Recebe ações enviadas pelo outro celular via servidor
+    socket.on("game-action", (actionData) => {
+      if (engineRef.current) {
+        engineRef.current.dispatch(actionData);
+      }
+    });
+
+    return () => {
+      socket.off("assign-role");
+      socket.off("game-action");
+    };
+  }, []);
+
+  // 4. Sistema Puro de Física e Regras
   const gameSystem = (entities: any, { events, dispatch }: any) => {
     if (hudState.winner) return entities;
 
@@ -96,11 +125,9 @@ export default function ArenaPokemonGame() {
 
     if (!p1 || !p2) return entities;
 
-    // Reset visual de dano por frame
     p1.isHit = false;
     p2.isHit = false;
 
-    // Direção dos sprites
     if (p1.x < p2.x) {
       p1.facing = "right";
       p2.facing = "left";
@@ -115,7 +142,6 @@ export default function ArenaPokemonGame() {
         const proj = entities[key];
         proj.x += proj.vx;
 
-        // Hitbox P1 -> P2
         if (proj.owner === "p1" && Math.abs(proj.x - p2.x) < 35 && Math.abs(proj.y - p2.y) < 35) {
           if (!p2.isHiding) {
             p2.hp = Math.max(0, p2.hp - 20);
@@ -128,7 +154,6 @@ export default function ArenaPokemonGame() {
           delete entities[key];
         }
 
-        // Hitbox P2 -> P1
         if (proj.owner === "p2" && Math.abs(proj.x - p1.x) < 35 && Math.abs(proj.y - p1.y) < 35) {
           if (!p1.isHiding) {
             p1.hp = Math.max(0, p1.hp - 20);
@@ -141,29 +166,23 @@ export default function ArenaPokemonGame() {
           delete entities[key];
         }
 
-        // Limpeza fora da tela
         if (proj.x < -20 || proj.x > SCREEN_WIDTH + 20) {
           delete entities[key];
         }
       }
     });
 
-    // Comandos de Controle
+    // Comandos recebidos localmente ou da rede
     if (events && events.length) {
       events.forEach((e: any) => {
-        // Movimentos P1
         if (e.type === "MOVE_P1_X") p1.x = Math.max(10, Math.min(SCREEN_WIDTH - 85, p1.x + e.payload));
         if (e.type === "MOVE_P1_Y") p1.y = Math.max(50, Math.min(ARENA_HEIGHT - 80, p1.y + e.payload));
-
-        // Movimentos P2
         if (e.type === "MOVE_P2_X") p2.x = Math.max(10, Math.min(SCREEN_WIDTH - 85, p2.x + e.payload));
         if (e.type === "MOVE_P2_Y") p2.y = Math.max(50, Math.min(ARENA_HEIGHT - 80, p2.y + e.payload));
 
-        // Esquiva
         if (e.type === "HIDE_P1") p1.isHiding = !p1.isHiding;
         if (e.type === "HIDE_P2") p2.isHiding = !p2.isHiding;
 
-        // Ataques
         if (e.type === "ATTACK_P1") {
           entities[`proj_${Date.now()}`] = {
             x: p1.x + (p1.facing === "right" ? 50 : -10),
@@ -188,38 +207,26 @@ export default function ArenaPokemonGame() {
       });
     }
 
-    // Regras de KO e Vida
     if (p1.hp <= 0) {
       p1.vidas -= 1;
       p1.hp = 100;
-      if (p1.vidas <= 0) {
-        dispatch({ type: "GAME_OVER", payload: "Charizard" });
-      }
+      if (p1.vidas <= 0) dispatch({ type: "GAME_OVER", payload: "Charizard" });
     }
 
     if (p2.hp <= 0) {
       p2.vidas -= 1;
       p2.hp = 100;
-      if (p2.vidas <= 0) {
-        dispatch({ type: "GAME_OVER", payload: "Pikachu" });
-      }
+      if (p2.vidas <= 0) dispatch({ type: "GAME_OVER", payload: "Pikachu" });
     }
 
-    // Sincroniza a barra de HUD com o engine de forma segura
     dispatch({
       type: "SYNC_HUD",
-      payload: {
-        p1Hp: p1.hp,
-        p1Vidas: p1.vidas,
-        p2Hp: p2.hp,
-        p2Vidas: p2.vidas,
-      },
+      payload: { p1Hp: p1.hp, p1Vidas: p1.vidas, p2Hp: p2.hp, p2Vidas: p2.vidas },
     });
 
     return entities;
   };
 
-  // 5. Manipulador seguro de eventos vindos do GameEngine para a UI
   const handleEvent = (e: any) => {
     if (e.type === "UPDATE_HUD") {
       setHudState((prev) => ({ ...prev, log: e.payload.log }));
@@ -236,10 +243,11 @@ export default function ArenaPokemonGame() {
     }
   };
 
-  const dispatch = (type: string, payload?: any) => {
-    if (engineRef.current && !hudState.winner) {
-      engineRef.current.dispatch({ type, payload });
-    }
+  // Função modificada: agora envia a ação para o servidor emitir para ambos os celulares
+  const sendAction = (type: string, payload?: any) => {
+    const action = { type, payload };
+    // Envia para o servidor para sincronizar nos dois aparelhos
+    socket.emit("player-action", action);
   };
 
   const resetGame = () => {
@@ -262,7 +270,6 @@ export default function ArenaPokemonGame() {
         source={{ uri: "https://i.imgur.com/3ZQ3ZfO.png" }}
         style={styles.arenaBackground}
       >
-        {/* HUD ISOLADO DO LOOP DO JOGO */}
         <View style={styles.hudOverlay}>
           <View style={styles.playerHud}>
             <Text style={styles.hudName}>Pikachu (P1)</Text>
@@ -286,7 +293,6 @@ export default function ArenaPokemonGame() {
           </View>
         </View>
 
-        {/* ENGINE */}
         <GameEngine
           ref={engineRef}
           style={{ flex: 1 }}
@@ -305,65 +311,69 @@ export default function ArenaPokemonGame() {
         )}
       </ImageBackground>
 
-      {/* CONTROLES */}
+      {/* CONTROLES SEPARADOS POR APARELHO */}
       <View style={styles.controlsContainer}>
-        {/* P1 CONTROLS */}
-        <View style={styles.playerControlSection}>
-          <Text style={styles.sectionTitle}>P1 - CONTROLES</Text>
-          <View style={styles.dpad}>
-            <TouchableOpacity style={styles.dbtn} onPress={() => dispatch("MOVE_P1_Y", -20)}>
-              <Text style={styles.btnText}>▲</Text>
-            </TouchableOpacity>
-            <View style={styles.dpadRow}>
-              <TouchableOpacity style={styles.dbtn} onPress={() => dispatch("MOVE_P1_X", -20)}>
-                <Text style={styles.btnText}>◄</Text>
+        {!playerRole ? (
+          <Text style={styles.waitingText}>Conectando ao servidor...</Text>
+        ) : playerRole === "p1" ? (
+          /* CONTROLES EXCLUSIVOS DO JOGADOR 1 (PIKACHU) */
+          <View style={styles.playerControlSection}>
+            <Text style={styles.sectionTitle}>SEUS CONTROLES (Pikachu)</Text>
+            <View style={styles.dpad}>
+              <TouchableOpacity style={styles.dbtn} onPress={() => sendAction("MOVE_P1_Y", -20)}>
+                <Text style={styles.btnText}>▲</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.dbtn} onPress={() => dispatch("MOVE_P1_X", 20)}>
-                <Text style={styles.btnText}>►</Text>
-              </TouchableOpacity>
-            </View>
-            <TouchableOpacity style={styles.dbtn} onPress={() => dispatch("MOVE_P1_Y", 20)}>
-              <Text style={styles.btnText}>▼</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.actionGroup}>
-            <TouchableOpacity style={[styles.actionBtn, styles.btnAtk1]} onPress={() => dispatch("ATTACK_P1")}>
-              <Text style={styles.btnText}>ATACAR</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.actionBtn, styles.btnHide]} onPress={() => dispatch("HIDE_P1")}>
-              <Text style={styles.btnText}>ESQUIVAR</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* P2 CONTROLS */}
-        <View style={styles.playerControlSection}>
-          <Text style={styles.sectionTitle}>P2 - CONTROLES</Text>
-          <View style={styles.dpad}>
-            <TouchableOpacity style={styles.dbtn} onPress={() => dispatch("MOVE_P2_Y", -20)}>
-              <Text style={styles.btnText}>▲</Text>
-            </TouchableOpacity>
-            <View style={styles.dpadRow}>
-              <TouchableOpacity style={styles.dbtn} onPress={() => dispatch("MOVE_P2_X", -20)}>
-                <Text style={styles.btnText}>◄</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.dbtn} onPress={() => dispatch("MOVE_P2_X", 20)}>
-                <Text style={styles.btnText}>►</Text>
+              <View style={styles.dpadRow}>
+                <TouchableOpacity style={styles.dbtn} onPress={() => sendAction("MOVE_P1_X", -20)}>
+                  <Text style={styles.btnText}>◄</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.dbtn} onPress={() => sendAction("MOVE_P1_X", 20)}>
+                  <Text style={styles.btnText}>►</Text>
+                </TouchableOpacity>
+              </View>
+              <TouchableOpacity style={styles.dbtn} onPress={() => sendAction("MOVE_P1_Y", 20)}>
+                <Text style={styles.btnText}>▼</Text>
               </TouchableOpacity>
             </View>
-            <TouchableOpacity style={styles.dbtn} onPress={() => dispatch("MOVE_P2_Y", 20)}>
-              <Text style={styles.btnText}>▼</Text>
-            </TouchableOpacity>
+            <View style={styles.actionGroup}>
+              <TouchableOpacity style={[styles.actionBtn, styles.btnAtk1]} onPress={() => sendAction("ATTACK_P1")}>
+                <Text style={styles.btnText}>ATACAR</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.actionBtn, styles.btnHide]} onPress={() => sendAction("HIDE_P1")}>
+                <Text style={styles.btnText}>ESQUIVAR</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-          <View style={styles.actionGroup}>
-            <TouchableOpacity style={[styles.actionBtn, styles.btnAtk2]} onPress={() => dispatch("ATTACK_P2")}>
-              <Text style={styles.btnText}>ATACAR</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.actionBtn, styles.btnHide]} onPress={() => dispatch("HIDE_P2")}>
-              <Text style={styles.btnText}>ESQUIVAR</Text>
-            </TouchableOpacity>
+        ) : (
+          /* CONTROLES EXCLUSIVOS DO JOGADOR 2 (CHARIZARD) */
+          <View style={styles.playerControlSection}>
+            <Text style={styles.sectionTitle}>SEUS CONTROLES (Charizard)</Text>
+            <View style={styles.dpad}>
+              <TouchableOpacity style={styles.dbtn} onPress={() => sendAction("MOVE_P2_Y", -20)}>
+                <Text style={styles.btnText}>▲</Text>
+              </TouchableOpacity>
+              <View style={styles.dpadRow}>
+                <TouchableOpacity style={styles.dbtn} onPress={() => sendAction("MOVE_P2_X", -20)}>
+                  <Text style={styles.btnText}>◄</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.dbtn} onPress={() => sendAction("MOVE_P2_X", 20)}>
+                  <Text style={styles.btnText}>►</Text>
+                </TouchableOpacity>
+              </View>
+              <TouchableOpacity style={styles.dbtn} onPress={() => sendAction("MOVE_P2_Y", 20)}>
+                <Text style={styles.btnText}>▼</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.actionGroup}>
+              <TouchableOpacity style={[styles.actionBtn, styles.btnAtk2]} onPress={() => sendAction("ATTACK_P2")}>
+                <Text style={styles.btnText}>ATACAR</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.actionBtn, styles.btnHide]} onPress={() => sendAction("HIDE_P2")}>
+                <Text style={styles.btnText}>ESQUIVAR</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -392,18 +402,19 @@ const styles = StyleSheet.create({
   btnReset: { backgroundColor: "#2979FF", paddingHorizontal: 20, paddingVertical: 10, borderRadius: 6 },
   btnResetText: { color: "#FFF", fontWeight: "bold" },
 
-  controlsContainer: { flex: 1, flexDirection: "row", backgroundColor: "#121212", padding: 8, gap: 8 },
+  controlsContainer: { flex: 1, flexDirection: "row", backgroundColor: "#121212", padding: 8, justifyContent: "center" },
   playerControlSection: { flex: 1, backgroundColor: "#1A1A1A", borderRadius: 8, padding: 8, justifyContent: "space-between" },
-  sectionTitle: { color: "#AAA", fontSize: 10, fontWeight: "bold", textAlign: "center" },
+  sectionTitle: { color: "#AAA", fontSize: 12, fontWeight: "bold", textAlign: "center" },
+  waitingText: { color: "#FFF", alignSelf: "center", fontSize: 16 },
 
   dpad: { alignItems: "center" },
   dpadRow: { flexDirection: "row", gap: 10, marginVertical: 2 },
-  dbtn: { backgroundColor: "#2B2B2B", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 4, minWidth: 40, alignItems: "center" },
+  dbtn: { backgroundColor: "#2B2B2B", paddingVertical: 12, paddingHorizontal: 16, borderRadius: 4, minWidth: 50, alignItems: "center" },
 
   actionGroup: { flexDirection: "row", gap: 6 },
-  actionBtn: { flex: 1, paddingVertical: 10, borderRadius: 4, alignItems: "center" },
+  actionBtn: { flex: 1, paddingVertical: 14, borderRadius: 4, alignItems: "center" },
   btnAtk1: { backgroundColor: "#D32F2F" },
   btnAtk2: { backgroundColor: "#E65100" },
   btnHide: { backgroundColor: "#388E3C" },
-  btnText: { color: "#FFF", fontSize: 10, fontWeight: "bold" },
+  btnText: { color: "#FFF", fontSize: 12, fontWeight: "bold" },
 });
