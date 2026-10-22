@@ -1,0 +1,5 @@
+cd gammes
+npx expo start -c
+em cmd diferente
+cd gammes
+npm run server
